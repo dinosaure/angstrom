@@ -92,6 +92,7 @@ module Unbuffered = struct
 
   type 'a state =
     | Partial of 'a partial
+    | Jump    of (unit -> 'a state) (* trampoline *)
     | Done    of int * 'a
     | Fail    of int * string list * string
   and 'a partial =
@@ -117,8 +118,9 @@ module Unbuffered = struct
     | Done(_, v) -> Some v
     | _          -> None
 
-  let state_to_result = function
+  let rec state_to_result = function
     | Done(_, v)          -> Result.Ok v
+    | Jump jump           -> (state_to_result[@tailcall]) (jump ())
     | Partial _           -> Result.Error "incomplete input"
     | Fail(_, marks, err) -> Result.Error (fail_to_string marks err)
 
@@ -135,6 +137,7 @@ type more = Unbuffered.more =
 
 type 'a state = 'a Unbuffered.state =
   | Partial of 'a partial
+  | Jump    of (unit -> 'a state)
   | Done    of int * 'a
   | Fail    of int * string list * string
 and 'a partial = 'a Unbuffered.partial =
@@ -162,11 +165,13 @@ module Buffered = struct
 
   type 'a state =
     | Partial of ([ input | `Eof ] -> 'a state)
+    | Jump    of (unit -> 'a state)
     | Done    of unconsumed * 'a
     | Fail    of unconsumed * string list * string
 
-  let from_unbuffered_state ~f buffering = function
-    | Unbuffered.Partial p         -> Partial (f p)
+  let rec from_unbuffered_state ~f buffering = function
+    | Unbuffered.Partial p              -> Partial (f p)
+    | Unbuffered.Jump jump              -> Jump (fun () -> (from_unbuffered_state[@tailcall]) ~f buffering (jump ()))
     | Unbuffered.Done(consumed, v) ->
       let unconsumed = Buffering.unconsumed ~shift:consumed buffering in
       Done(unconsumed, v)
@@ -195,9 +200,10 @@ module Buffered = struct
     let for_reading = Buffering.for_reading buffering in
     from_unbuffered_state buffering ~f (Unbuffered.parse ~input:for_reading p)
 
-  let feed state input =
+  let rec feed state input =
     match state with
     | Partial k -> k input
+    | Jump jump -> (feed[@tailcall]) (jump ()) input
     | Fail(unconsumed, marks, msg) ->
       begin match input with
       | `Eof   -> state
@@ -219,8 +225,9 @@ module Buffered = struct
     | Done(_, v) -> Some v
     | _          -> None
 
-  let state_to_result = function
+  let rec state_to_result = function
     | Partial _           -> Result.Error "incomplete input"
+    | Jump jump           -> (state_to_result[@tailcall]) (jump ())
     | Done(_, v)          -> Result.Ok v
     | Fail(_, marks, msg) -> Result.Error (Unbuffered.fail_to_string marks msg)
 
@@ -252,13 +259,13 @@ let fail msg =
 
 let (>>=) p f =
   { run = fun input pos more fail succ ->
-    let succ' input' pos' more' v = (f v).run input' pos' more' fail succ in
+    let succ' input' pos' more' v = Jump (fun () -> (f v).run input' pos' more' fail succ) in
     p.run input pos more fail succ'
   }
 
 let (>>|) p f =
   { run = fun input pos more fail succ ->
-    let succ' input' pos' more' v = succ input' pos' more' (f v) in
+    let succ' input' pos' more' v = Jump (fun () -> succ input' pos' more' (f v)) in
     p.run input pos more fail succ'
   }
 
@@ -269,8 +276,8 @@ let (<*>) f m =
   (* f >>= fun f -> m >>| f *)
   { run = fun input pos more fail succ ->
     let succ0 input0 pos0 more0 f =
-      let succ1 input1 pos1 more1 m = succ input1 pos1 more1 (f m) in
-      m.run input0 pos0 more0 fail succ1
+      let succ1 input1 pos1 more1 m = Jump (fun () -> succ input1 pos1 more1 (f m)) in
+      Jump (fun () -> m.run input0 pos0 more0 fail succ1)
     in
     f.run input pos more fail succ0 }
 
@@ -280,8 +287,8 @@ let lift f m =
 let lift2 f m1 m2 =
   { run = fun input pos more fail succ ->
     let succ1 input1 pos1 more1 m1 =
-      let succ2 input2 pos2 more2 m2 = succ input2 pos2 more2 (f m1 m2) in
-      m2.run input1 pos1 more1 fail succ2
+      let succ2 input2 pos2 more2 m2 = Jump (fun () -> succ input2 pos2 more2 (f m1 m2)) in
+      Jump (fun () -> m2.run input1 pos1 more1 fail succ2)
     in
     m1.run input pos more fail succ1 }
 
@@ -312,7 +319,7 @@ let lift4 f m1 m2 m3 m4 =
 let ( *>) a b =
   (* a >>= fun _ -> b *)
   { run = fun input pos more fail succ ->
-    let succ' input' pos' more' _ = b.run input' pos' more' fail succ in
+    let succ' input' pos' more' _ = Jump (fun () -> b.run input' pos' more' fail succ) in
     a.run input pos more fail succ'
   }
 
@@ -320,7 +327,7 @@ let (<* ) a b =
   (* a >>= fun x -> b >>| fun _ -> x *)
   { run = fun input pos more fail succ ->
     let succ0 input0 pos0 more0 x =
-      let succ1 input1 pos1 more1 _ = succ input1 pos1 more1 x in
+      let succ1 input1 pos1 more1 _ = Jump (fun () -> succ input1 pos1 more1 x) in
       b.run input0 pos0 more0 fail succ1
     in
     a.run input pos more fail succ0 }
@@ -343,7 +350,7 @@ let (<|>) p q =
       if pos < Input.commit_pos input' then
         fail input' pos' more marks msg
       else
-        q.run input' pos more' fail succ in
+        Jump (fun () -> q.run input' pos more' fail succ) in
     p.run input pos more fail' succ
   }
 
@@ -362,7 +369,7 @@ let rec prompt input pos fail succ =
       if more = Complete then
         fail input pos Complete
       else
-        prompt input pos fail succ
+        (prompt[@tailcall]) input pos fail succ
     else
       succ input pos more
   in
@@ -373,7 +380,7 @@ let demand_input =
     match more with
     | Complete   -> fail input pos more [] "not enough input"
     | Incomplete ->
-      let succ' input' pos' more' = succ input' pos' more' ()
+      let succ' input' pos' more' = Jump (succ input' pos' more')
       and fail' input' pos' more' = fail input' pos' more' [] "not enough input" in
       prompt input pos fail' succ'
   }
@@ -382,7 +389,7 @@ let ensure_suspended n input pos more fail succ =
   let rec go =
     { run = fun input' pos' more' fail' succ' ->
       if pos' + n <= Input.length input' then
-        succ' input' pos' more' ()
+        Jump (succ' input' pos' more')
       else
         (demand_input *> go).run input' pos' more' fail' succ'
     }
@@ -397,7 +404,7 @@ let unsafe_substring n =
 let ensure n =
   { run = fun input pos more fail succ ->
     if pos + n <= Input.length input then
-      succ input pos more ()
+      Jump (succ input pos more)
     else
       ensure_suspended n input pos more fail succ
   }
@@ -409,12 +416,12 @@ let ensure n =
 let at_end_of_input =
   { run = fun input pos more _ succ ->
     if pos < Input.length input then
-      succ input pos more false
+      Jump (fun () -> succ input pos more false)
     else match more with
     | Complete -> succ input pos more true
     | Incomplete ->
-      let succ' input' pos' more' = succ input' pos' more' false
-      and fail' input' pos' more' = succ input' pos' more' true in
+      let succ' input' pos' more' = Jump (fun () -> succ input' pos' more' false)
+      and fail' input' pos' more' = Jump (fun () -> succ input' pos' more' true) in
       prompt input pos fail' succ'
   }
 
@@ -425,28 +432,28 @@ let end_of_input =
     | false -> fail "end_of_input"
 
 let advance n =
-  { run = fun input pos more _fail succ -> succ input (pos + n) more () }
+  { run = fun input pos more _fail succ -> Jump (succ input (pos + n) more) }
 
 let pos =
-  { run = fun input pos more _fail succ -> succ input pos more pos }
+  { run = fun input pos more _fail succ -> Jump (fun () -> succ input pos more pos) }
 
 let available =
   { run = fun input pos more _fail succ ->
-    succ input pos more (Input.length input - pos)
+    Jump (fun () -> succ input pos more (Input.length input - pos))
   }
 
 let get_buffer_and_pos =
-  { run = fun input pos more _fail succ -> succ input pos more (input, pos) }
+  { run = fun input pos more _fail succ -> Jump (fun () -> succ input pos more (input, pos)) }
 
 let commit =
   { run = fun input pos more _fail succ ->
     Input.commit input pos;
-    succ input pos more () }
+    Jump (succ input pos more) }
 
 (* Do not use this if [p] contains a [commit]. *)
 let unsafe_lookahead p =
   { run = fun input pos more fail succ ->
-    let succ' input' _ more' v = succ input' pos more' v in
+    let succ' input' _ more' v = Jump (fun () -> succ input' pos more' v) in
     p.run input pos more fail succ' }
 
 let peek_char =
@@ -457,9 +464,9 @@ let peek_char =
       succ input pos more None
     else
       let succ' input' pos' more' =
-        succ input' pos' more' (Some (Input.get_char input' pos'))
+        Jump (fun () -> succ input' pos' more' (Some (Input.get_char input' pos')))
       and fail' input' pos' more' =
-        succ input' pos' more' None in
+        Jump (fun () -> succ input' pos' more' None) in
       prompt input pos fail' succ'
   }
 
@@ -468,12 +475,12 @@ let _char ~msg f =
     if pos < Input.length input then
       match f (Input.get_char input pos) with
       | None   -> fail input pos more [] msg
-      | Some v -> succ input (pos + 1) more v
+      | Some v -> Jump (fun () -> succ input (pos + 1) more v)
     else
       let succ' input' pos' more' () =
         match f (Input.get_char input' pos') with
         | None   -> fail input' pos' more' [] msg
-        | Some v -> succ input' (pos' + 1) more' v
+        | Some v -> Jump (fun () -> succ input' (pos' + 1) more' v)
       in
       ensure_suspended 1 input pos more fail succ'
   }
@@ -513,9 +520,9 @@ let count_while ?(init=0) f =
       (* Check if the loop terminated because it reached the end of the input
        * buffer. If so, then prompt for additional input and continue. *)
       if pos + acc' < Input.length input || more = Complete then
-        succ input pos more acc'
+        Jump (fun () -> succ input pos more acc')
       else
-        let succ' input' pos' more' = (go acc').run input' pos' more' fail succ
+        let succ' input' pos' more' = Jump (fun () -> (go acc').run input' pos' more' fail succ)
         and fail' input' pos' more' = succ input' pos' more' acc' in
         prompt input pos fail' succ'
     }

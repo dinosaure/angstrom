@@ -56,8 +56,9 @@ let rec finalize state result =
   | Partial _, `Stopped () -> assert false
   | state    , _           -> state_to_result state
 
-let response = function
+let rec response = function
   | Partial p  -> `Consumed(p.committed, `Need_unknown)
+  | Jump jump  -> (response[@tailcall]) (jump ())
   | Done(c, _) -> `Stop_consumed((), c)
   | Fail _     -> `Stop ()
 
