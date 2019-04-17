@@ -165,7 +165,7 @@ let rec prompt input pos fail succ =
   Partial { committed = Input.bytes_for_client_to_commit input; continue }
 
 let demand_input =
-  { run = fun input pos more fail succ ->
+  { run = fun input pos more fail succ () ->
     match (more : More.t) with
     | Complete   -> fail input pos more [] "not enough input"
     | Incomplete ->
@@ -176,39 +176,39 @@ let demand_input =
 
 let ensure_suspended n input pos more fail succ =
   let rec go =
-    { run = fun input' pos' more' fail' succ' ->
+    { run = fun input' pos' more' fail' succ' () ->
       if pos' + n <= Input.length input' then
         succ' input' pos' more' ()
       else
-        (demand_input *> go).run input' pos' more' fail' succ'
+        (demand_input *> go).run input' pos' more' fail' succ' ()
     }
   in
-  (demand_input *> go).run input pos more fail succ
+  (demand_input *> go).run input pos more fail succ ()
 
 let unsafe_apply len ~f =
-  { run = fun input pos more _fail succ ->
+  { run = fun input pos more _fail succ () ->
     succ input (pos + len) more (Input.apply input pos len ~f)
   }
 
 let unsafe_apply_opt len ~f =
-  { run = fun input pos more fail succ ->
+  { run = fun input pos more fail succ () ->
     match Input.apply input pos len ~f with
     | Error e -> fail input pos more [] e
     | Ok    x -> succ input (pos + len) more x
   }
 
 let ensure n p =
-  { run = fun input pos more fail succ ->
+  { run = fun input pos more fail succ () ->
     if pos + n <= Input.length input
-    then p.run input pos more fail succ
+    then p.run input pos more fail succ ()
     else
-      let succ' input' pos' more' () = p.run input' pos' more' fail succ in
+      let succ' input' pos' more' () = p.run input' pos' more' fail succ () in
       ensure_suspended n input pos more fail succ' }
 
 (** END: getting input *)
 
 let at_end_of_input =
-  { run = fun input pos more _ succ ->
+  { run = fun input pos more _ succ () ->
     if pos < Input.length input then
       succ input pos more false
     else match more with
@@ -230,20 +230,20 @@ let advance n =
   then fail "advance"
   else
     let p =
-      { run = fun input pos more _fail succ -> succ input (pos + n) more () }
+      { run = fun input pos more _fail succ () -> succ input (pos + n) more () }
     in
     ensure n p
 
 let pos =
-  { run = fun input pos more _fail succ -> succ input pos more pos }
+  { run = fun input pos more _fail succ () -> succ input pos more pos }
 
 let available =
-  { run = fun input pos more _fail succ ->
+  { run = fun input pos more _fail succ () ->
     succ input pos more (Input.length input - pos)
   }
 
 let commit =
-  { run = fun input pos more _fail succ ->
+  { run = fun input pos more _fail succ () ->
     Input.commit input pos;
     succ input pos more () }
 
@@ -254,7 +254,7 @@ let unsafe_lookahead p =
     p.run input pos more fail succ' }
 
 let peek_char =
-  { run = fun input pos more _fail succ ->
+  { run = fun input pos more _fail succ () ->
     if pos < Input.length input then
       succ input pos more (Some (Input.get_char input pos))
     else if more = Complete then
@@ -269,16 +269,16 @@ let peek_char =
 
 (* This parser is too important to not be optimized. Do a custom job. *)
 let rec peek_char_fail =
-  { run = fun input pos more fail succ ->
+  { run = fun input pos more fail succ () ->
     if pos < Input.length input
     then succ input pos more (Input.get_char input pos)
     else
       let succ' input' pos' more' () =
-        peek_char_fail.run input' pos' more' fail succ in
+        peek_char_fail.run input' pos' more' fail succ () in
       ensure_suspended 1 input pos more fail succ' }
 
 let satisfy f =
-  { run = fun input pos more fail succ ->
+  { run = fun input pos more fail succ () ->
     if pos < Input.length input then
       let c = Input.get_char input pos in
       if f c
@@ -295,7 +295,7 @@ let satisfy f =
 
 let char c =
   let p =
-    { run = fun input pos more fail succ ->
+    { run = fun input pos more fail succ () ->
       if Input.get_char input pos = c
       then succ input (pos + 1) more c
       else fail input pos more [] (Printf.sprintf "char %C" c) }
@@ -304,7 +304,7 @@ let char c =
 
 let not_char c =
   let p =
-    { run = fun input pos more fail succ ->
+    { run = fun input pos more fail succ () ->
       let c' = Input.get_char input pos in
       if c <> c'
       then succ input (pos + 1) more c'
@@ -314,14 +314,14 @@ let not_char c =
 
 let any_char =
   let p =
-    { run = fun input pos more _fail succ ->
+    { run = fun input pos more _fail succ () ->
       succ input (pos + 1) more (Input.get_char input pos)  }
   in
   ensure 1 p
 
 let any_uint8 =
   let p =
-    { run = fun input pos more _fail succ ->
+    { run = fun input pos more _fail succ () ->
       let c = Input.get_char input pos in
       succ input (pos + 1) more (Char.code c) }
   in
@@ -331,7 +331,7 @@ let any_int8 =
   (* https://graphics.stanford.edu/~seander/bithacks.html#VariableSignExtendRisky *)
   let s = Sys.int_size - 8 in
   let p =
-    { run = fun input pos more _fail succ ->
+    { run = fun input pos more _fail succ () ->
       let c = Input.get_char input pos in
       succ input (pos + 1) more ((Char.code c lsl s) asr s) }
   in
@@ -339,7 +339,7 @@ let any_int8 =
 
 let skip f =
   let p =
-    { run = fun input pos more fail succ ->
+    { run = fun input pos more fail succ () ->
       if f (Input.get_char input pos)
       then succ input (pos + 1) more ()
       else fail input pos more [] "skip" }
@@ -347,7 +347,7 @@ let skip f =
   ensure 1 p
 
 let rec count_while ~init ~f ~with_buffer =
-  { run = fun input pos more fail succ ->
+  { run = fun input pos more fail succ () ->
     let len         = Input.count_while input (pos + init) ~f in
     let input_len   = Input.length input in
     let init'       = init + len in
@@ -357,7 +357,7 @@ let rec count_while ~init ~f ~with_buffer =
     then succ input (pos + init') more (Input.apply input pos init' ~f:with_buffer)
     else
       let succ' input' pos' more' =
-        (count_while ~init:init' ~f ~with_buffer).run input' pos' more' fail succ
+        (count_while ~init:init' ~f ~with_buffer).run input' pos' more' fail succ ()
       and fail' input' pos' more' =
         succ input' (pos' + init') more' (Input.apply input' pos' init' ~f:with_buffer)
       in
@@ -365,7 +365,7 @@ let rec count_while ~init ~f ~with_buffer =
   }
 
 let rec count_while1 ~f ~with_buffer =
-  { run = fun input pos more fail succ ->
+  { run = fun input pos more fail succ () ->
     let len         = Input.count_while input pos ~f in
     let input_len   = Input.length input in
     (* Check if the loop terminated because it reached the end of the input
@@ -376,7 +376,7 @@ let rec count_while1 ~f ~with_buffer =
       then fail input pos more [] "count_while1"
       else
         let succ' input' pos' more' =
-          (count_while1 ~f ~with_buffer).run input' pos' more' fail succ
+          (count_while1 ~f ~with_buffer).run input' pos' more' fail succ ()
         and fail' input' pos' more' =
           fail input' pos' more' [] "count_while1"
         in
@@ -385,7 +385,7 @@ let rec count_while1 ~f ~with_buffer =
     then succ input (pos + len) more (Input.apply input pos len ~f:with_buffer)
     else
       let succ' input' pos' more' =
-        (count_while ~init:len ~f ~with_buffer).run input' pos' more' fail succ
+        (count_while ~init:len ~f ~with_buffer).run input' pos' more' fail succ ()
       and fail' input' pos' more' =
         succ input' (pos' + len) more' (Input.apply input' pos' len ~f:with_buffer)
       in
@@ -500,7 +500,7 @@ let end_of_line =
   (char '\n' *> return ()) <|> (string "\r\n" *> return ()) <?> "end_of_line"
 
 let scan_ state f ~with_buffer =
-  { run = fun input pos more fail succ ->
+  { run = fun input pos more fail succ () ->
     let state = ref state in
     let parser =
       count_while ~init:0 ~f:(fun c ->
@@ -510,7 +510,7 @@ let scan_ state f ~with_buffer =
       ~with_buffer
       >>| fun x -> x, !state
     in
-    parser.run input pos more fail succ }
+    parser.run input pos more fail succ () }
 
 let scan state f =
   scan_ state f ~with_buffer:Bigstringaf.substring
@@ -532,7 +532,7 @@ module BE = struct
   let int16 n =
     let bytes = 2 in
     let p =
-      { run = fun input pos more fail succ ->
+      { run = fun input pos more fail succ () ->
         if (pos + bytes : int) <= Input.length input
         && Input.get_int16_be input pos = (n land 0xffff)
         then succ input (pos + bytes) more ()
@@ -543,7 +543,7 @@ module BE = struct
   let int32 n =
     let bytes = 4 in
     let p =
-      { run = fun input pos more fail succ ->
+      { run = fun input pos more fail succ () ->
         if (pos + bytes : int) <= Input.length input
         && Int32.equal (Input.get_int32_be input pos) n
         then succ input (pos + bytes) more ()
@@ -554,7 +554,7 @@ module BE = struct
   let int64 n =
     let bytes = 8 in
     let p =
-      { run = fun input pos more fail succ ->
+      { run = fun input pos more fail succ () ->
         if (pos + bytes : int) <= Input.length input
         && Int64.equal (Input.get_int64_be input pos) n
         then succ input (pos + bytes) more ()
@@ -585,7 +585,7 @@ module LE = struct
   let int16 n =
     let bytes = 2 in
     let p =
-      { run = fun input pos more fail succ ->
+      { run = fun input pos more fail succ () ->
         if (pos + bytes : int) <= Input.length input
         && Input.get_int16_le input pos = (n land 0xffff)
         then succ input (pos + bytes) more ()
@@ -596,7 +596,7 @@ module LE = struct
   let int32 n =
     let bytes = 4 in
     let p =
-      { run = fun input pos more fail succ ->
+      { run = fun input pos more fail succ () ->
         if (pos + bytes : int) <= Input.length input
         && Int32.equal (Input.get_int32_le input pos) n
         then succ input (pos + bytes) more ()
@@ -607,7 +607,7 @@ module LE = struct
   let int64 n =
     let bytes = 8 in
     let p =
-      { run = fun input pos more fail succ ->
+      { run = fun input pos more fail succ () ->
         if (pos + bytes : int) <= Input.length input
         && Int64.equal (Input.get_int64_le input pos) n
         then succ input (pos + bytes) more ()
