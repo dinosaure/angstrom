@@ -12,7 +12,7 @@ type 'a failure = (string list -> string -> 'a state) with_state
 type ('a, 'r) success = ('a -> 'r state) with_state
 
 type 'a t =
-  { run : 'r. ('r failure -> ('a, 'r) success -> 'r state) with_state }
+  { run : 'r. ('r failure -> ('a, 'r) success -> 'r state) with_state } [@@unboxed]
 
 let fail_k    input pos _ marks msg = Fail(pos - Input.client_committed_bytes input, marks, msg)
 let succeed_k input pos _       v   = Done(pos - Input.client_committed_bytes input, v)
