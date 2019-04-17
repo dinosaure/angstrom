@@ -40,24 +40,24 @@ let parse_bigstring p input =
 module Monad = struct
   let return v =
     { run = fun input pos more _fail succ ->
-      succ input pos more v
+      (); succ input pos more v
     }
 
   let fail msg =
     { run = fun input pos more fail _succ ->
-      fail input pos more [] msg
+      (); fail input pos more [] msg
     }
 
   let (>>=) p f =
     { run = fun input pos more fail succ ->
       let succ' input' pos' more' v = (f v).run input' pos' more' fail succ in
-      p.run input pos more fail succ'
+      (); p.run input pos more fail succ'
     }
 
   let (>>|) p f =
     { run = fun input pos more fail succ ->
       let succ' input' pos' more' v = succ input' pos' more' (f v) in
-      p.run input pos more fail succ'
+      (); p.run input pos more fail succ'
     }
 
   let (<$>) f m =
